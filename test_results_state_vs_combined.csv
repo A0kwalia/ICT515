@@ -1,0 +1,7 @@
+"FeatureSet","Model","AUC","Accuracy","Sensitivity","Specificity","BalancedAccuracy"
+"State-based","LogisticRegression",0.617,0.541,0.672,0.504,0.588
+"State-based","DecisionTree",0.598,0.577,0.598,0.571,0.585
+"State-based","RandomForest",0.567,0.777,0.006,0.996,0.501
+"Combined (baseline)","LogisticRegression",0.714,0.674,0.641,0.684,0.662
+"Combined (baseline)","DecisionTree",0.688,0.806,0.456,0.905,0.68
+"Combined (baseline)","RandomForest",0.751,0.781,0.559,0.844,0.702
