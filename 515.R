@@ -1,18 +1,19 @@
 # =============================================================================
 # ICT515 Assignment 2 - Default of Credit Card Clients
-# Part 2: Feature selection (visual) + model selection
+# Feature selection (visual) + model selection for three feature sets
 #
-#   1. Load & clean the data (your existing code)
+#   1. Load & clean the data
 #   2. Prepare the data for analysis (readable names, proper factor types)
 #   3. Feature selection: plot every predictor against the outcome (DEFAULT)
-#   4. Build the two feature sets:
-#        - STATE-BASED   : static/demographic variables (my part)
-#        - COMBINED      : state + selected temporal variables (baseline)
-#      (the TEMPORAL-only set is modelled by the other team, using the SAME
-#       train/test split and CV folds saved in this script)
-#   5. Model selection: train the same 3 algorithms on each feature set
+#   4. Build the three feature sets:
+#        - STATE-BASED : static/demographic variables
+#        - TEMPORAL    : repayment-history variables
+#        - COMBINED    : state + temporal (baseline)
+#   5. One shared train/test split and one shared set of CV folds
+#   6. Model selection: the SAME 3 algorithms on every feature set
 #        - Logistic Regression, Decision Tree, Random Forest
-#   6. Evaluate the chosen models on the held-out test set and compare
+#   7. Final evaluation on the held-out test set + comparison of feature sets
+#   8. Check of the feature-selection decision (re-adding bill amounts)
 # =============================================================================
 
 
@@ -22,7 +23,7 @@
 # Install only the packages that are missing, so re-running the script does
 # not reinstall everything each time.
 packages <- c("readxl", "SmartEDA", "dplyr", "ggplot2", "gridExtra",
-              "caret", "e1071", "rpart", "randomForest", "pROC")
+              "caret", "e1071", "rpart", "ranger", "pROC")
 missing_pkgs <- packages[!packages %in% installed.packages()[, "Package"]]
 if (length(missing_pkgs) > 0) install.packages(missing_pkgs)
 
@@ -33,11 +34,15 @@ library(ggplot2)      # plotting
 library(gridExtra)    # putting two ggplots side by side
 library(caret)        # one consistent interface for training/tuning models
 library(rpart)        # decision tree engine used by caret
-library(randomForest) # random forest engine used by caret
+library(ranger)       # random forest engine used by caret (probability forest)
 library(pROC)         # ROC curves and AUC
 
 
-
+# -----------------------------------------------------------------------------
+# 1. Loaded and cleaned the data
+# -----------------------------------------------------------------------------
+# The .xls file must be in the working directory (Session > Set Working
+# Directory > To Source File Location), so the script runs on any computer.
 #loaded dataset into df
 raw_data <- read_excel("default of credit card clients.xls")
 
@@ -51,24 +56,17 @@ table(sapply(clean_data, class))
 #converted the numerical columns into their proper datatype
 credit_data <- clean_data %>%
   mutate(across(
-    c("X1", "X5", X12:X23), 
+    c("X1", "X5", X12:X23),
     ~ as.numeric(as.character(.))
   ))
 
-
-#created the report. Some categorical variables... 
+#created the report. Some categorical variables...
 #...with over 10 distinct values did not show.
 ExpReport(data = credit_data, Target = NULL, op_file = "smarteda_report.html")
 
-
 #generated the visualizations for the extra categorical columns
 #and added them manually to the html report
-ExpCatViz(
-  data = credit_data, 
-  target = "Y", 
-  clim = 15
-)
-
+ExpCatViz(data = credit_data, target = "Y", clim = 15)
 
 
 # -----------------------------------------------------------------------------
@@ -124,18 +122,28 @@ model_data <- credit_data %>%
 
 str(model_data)
 
+# No missing values in any column (confirmed by the EDA report as well)
+sum(is.na(model_data))
+
 # Overall default rate - this is the "reference line" for every plot below.
 # About 22% of clients default, so the classes are imbalanced.
 overall_rate <- mean(model_data$DEFAULT == "Yes")
 overall_rate
 
 
+
+
+
+
+
+
 # -----------------------------------------------------------------------------
 # 3. FEATURE SELECTION: PLOT EACH PREDICTOR AGAINST THE OUTCOME
 # -----------------------------------------------------------------------------
 # Idea: a predictor is useful if the default rate CHANGES across its values.
-# If the default rate stays flat at ~22% no matter what the predictor's value
-# is, the predictor tells the model nothing and can be dropped.
+# If the default rate stays flat at ~22% (the overall default rate of the
+# dataset) no matter what the predictor's value is, the predictor tells the
+# model nothing and can be dropped.
 #
 #  - Categorical / few-valued predictors -> bar chart of default rate per level
 #  - Continuous predictors -> (a) boxplot by DEFAULT and
@@ -236,12 +244,11 @@ categorical_vars <- c("SEX", "EDUCATION", "MARRIAGE", pay_status_vars)
 numeric_vars     <- c("LIMIT_BAL", "AGE", bill_vars, pay_amount_vars)
 
 # --- 3e. Draw every plot ---------------------------------------------------------
-# State-based predictors (needed for the state model)
+# State-based predictors
 for (v in intersect(state_vars, categorical_vars)) plot_categorical(model_data, v)
 for (v in intersect(state_vars, numeric_vars))     plot_numeric(model_data, v)
 
-# Temporal predictors (needed to choose the temporal part of the COMBINED
-# baseline; the other team can reuse these plots too)
+# Temporal predictors
 for (v in pay_status_vars) plot_categorical(model_data, v)
 for (v in c(bill_vars, pay_amount_vars)) plot_numeric(model_data, v)
 
@@ -253,42 +260,66 @@ print(strength_table)
 write.csv(strength_table, "feature_strength_table.csv", row.names = FALSE)
 
 
+
+
+
+
+
+
+
+
+
 # -----------------------------------------------------------------------------
 # 4. DECIDE THE FEATURE SETS (based on the plots above)
 # -----------------------------------------------------------------------------
-# What the plots show (check these against your own plots before submitting):
 #  STATE-BASED
 #   - LIMIT_BAL : clear downward trend - default ~32% for the lowest limits,
 #                 ~14% for the highest. Strong -> KEEP
 #   - EDUCATION : HighSchool/University default more than GradSchool;
 #                 "Other" is much lower. -> KEEP
-#   - MARRIAGE  : Married and Other default more than Single. Moderate -> KEEP
+#   - MARRIAGE  : small but consistent differences between groups -> KEEP
 #   - AGE       : boxplots look almost identical (same median), BUT the decile
 #                 plot is U-shaped: young (<25) and older (>45) clients default
 #                 more. -> KEEP (tree/forest models can use a U-shape)
-#   - SEX       : males default slightly more (~24% vs ~21%). Weakest of the
-#                 five but consistent over large groups -> KEEP (borderline)
-#  -> all 5 state-based variables are kept.
+#   - SEX       : males default slightly more (~24% vs ~21%). Weak but
+#                 consistent over large groups -> KEEP (borderline)
+#   State-based variables are the subject of the research question, so all 5
+#   are kept.
 #
-#  TEMPORAL (for the combined baseline)
-#   - PAY_*     : default rate jumps from ~15% (paid on time) to 50-70% for
+#  TEMPORAL
+#   - PAY_*     : default rate jumps from ~15% (paid on time) to 50-75% for
 #                 clients 2+ months late. By far the strongest -> KEEP all 6
 #   - PAYAMT_*  : clients who pay very little default more (~30-35%) than
 #                 those who pay a lot (~13%). Clear trend -> KEEP all 6
-#   - BILL_*    : default rate stays flat around 20-26% across all deciles
-#                 with no trend. Not informative -> DROP all 6
+#   - BILL_*    : default rate zig-zags between ~20% and ~26% across deciles
+#                 with no trend. Not informative on their own -> DROP all 6
+#                 (this decision is tested in section 8)
 state_features    <- state_vars
-temporal_selected <- c(pay_status_vars, pay_amount_vars)
-combined_features <- c(state_features, temporal_selected)   # baseline set
+temporal_features <- c(pay_status_vars, pay_amount_vars)
+combined_features <- c(state_features, temporal_features)   # baseline set
+
+# All three sets in one named list, so every later step loops over them in
+# exactly the same way.
+feature_sets <- list(
+  "State-based"         = state_features,
+  "Temporal"            = temporal_features,
+  "Combined (baseline)" = combined_features
+)
+
+
+
+
+
+
+
 
 
 # -----------------------------------------------------------------------------
-# 5. TRAIN/TEST SPLIT AND CROSS-VALIDATION SET-UP (shared with the other team)
+# 5. TRAIN/TEST SPLIT AND CROSS-VALIDATION SET-UP (shared by all feature sets)
 # -----------------------------------------------------------------------------
 # For the comparison "state vs temporal vs combined" to be fair, ALL models
 # must be trained and tested on exactly the same rows. So we create the split
-# and the CV folds once, with a fixed seed, and save them to files that the
-# temporal team loads with readRDS().
+# and the CV folds once, with a fixed seed.
 set.seed(515)
 train_index <- createDataPartition(model_data$DEFAULT, p = 0.8, list = FALSE)[, 1]
 train_data  <- model_data[train_index, ]
@@ -302,9 +333,6 @@ prop.table(table(test_data$DEFAULT))
 set.seed(515)
 cv_folds <- createFolds(train_data$DEFAULT, k = 5, returnTrain = TRUE)
 
-saveRDS(train_index, "train_index.rds")   # send these two files to the
-saveRDS(cv_folds,    "cv_folds.rds")      # temporal team
-
 # How caret should evaluate each candidate model during training:
 #  - index = cv_folds      : use our fixed folds (same for every model)
 #  - classProbs = TRUE     : keep predicted probabilities (needed for ROC)
@@ -317,10 +345,16 @@ ctrl <- trainControl(index           = cv_folds,
                      savePredictions = "final")
 
 
+
+
+
+
+
 # -----------------------------------------------------------------------------
 # 6. MODEL SELECTION: SAME 3 ALGORITHMS ON EACH FEATURE SET
 # -----------------------------------------------------------------------------
-# Algorithms (all used in Yeh & Lien, 2009, or a standard extension):
+# Algorithms (logistic regression and classification trees were used in
+# Yeh & Lien, 2009; random forest is a standard extension of trees):
 #  - Logistic regression : simple, interpretable linear baseline
 #  - Decision tree       : captures non-linear effects (e.g. AGE's U-shape)
 #                          and thresholds; easy to explain
@@ -328,6 +362,16 @@ ctrl <- trainControl(index           = cv_folds,
 #                          less interpretable
 # caret tunes each model's settings (hyper-parameters) using the CV folds and
 # keeps the setting with the best mean ROC.
+
+# Random forest settings tried (6 combinations, chosen by CV ROC):
+#  - mtry          : predictors tried at each split (2, 4 or 6)
+#  - min.node.size : minimum clients per leaf (25 or 100); larger leaves
+#                    give smoother, less overfitted probabilities
+#  - splitrule     : gini (standard classification split)
+rf_grid <- expand.grid(mtry = c(2, 4, 6),
+                       splitrule = "gini",
+                       min.node.size = c(25, 100))
+
 fit_three_models <- function(features, data) {
   # builds e.g. DEFAULT ~ LIMIT_BAL + SEX + EDUCATION + MARRIAGE + AGE
   model_formula <- as.formula(paste("DEFAULT ~", paste(features, collapse = " + ")))
@@ -342,54 +386,76 @@ fit_three_models <- function(features, data) {
   tree <- train(model_formula, data = data, method = "rpart",
                 metric = "ROC", trControl = ctrl, tuneLength = 10)
   
-  # mtry = number of predictors tried at each split; caret tries 3 values.
-  # ntree = 200 keeps training time reasonable (this is the slowest model).
+  # Random forest using the ranger package as a PROBABILITY forest.
+  # Why not randomForest: randomForest makes each tree cast ONE vote for the
+  # majority class in its leaf. Many clients share identical state-based
+  # values, so leaves stay mixed and their majority is almost always "No".
+  # The forest then gave nearly everyone P(default) close to 0. A probability
+  # forest instead averages the actual default RATE in each leaf, so a leaf
+  # with 30% defaulters contributes 0.30 rather than a "No" vote.
+  # caret switches ranger into probability mode because classProbs = TRUE.
+  # importance = "impurity" is needed so varImp() works later.
   set.seed(515)
-  forest <- train(model_formula, data = data, method = "rf",
-                  metric = "ROC", trControl = ctrl, tuneLength = 3, ntree = 200)
+  forest <- train(model_formula, data = data, method = "ranger",
+                  metric = "ROC", trControl = ctrl, tuneGrid = rf_grid,
+                  num.trees = 300, importance = "impurity")
   
   list(LogisticRegression = logreg, DecisionTree = tree, RandomForest = forest)
 }
 
-# Train on the STATE-BASED features (may take a few minutes)
-state_models <- fit_three_models(state_features, train_data)
+# Train the 3 algorithms on each of the 3 feature sets (9 models in total).
+# This takes several minutes.
+all_models <- lapply(feature_sets, fit_three_models, data = train_data)
 
-# Train on the COMBINED features = baseline (slower: more predictors)
-combined_models <- fit_three_models(combined_features, train_data)
-
-# --- Compare the 3 algorithms using their cross-validation results ----------
+# --- 6a. Compare the 3 algorithms within each feature set (CV results) -------
 # resamples() lines up the 5 fold-level scores of each model so they can be
 # compared fairly (same folds for every model).
-state_cv    <- resamples(state_models)
-combined_cv <- resamples(combined_models)
+all_cv <- lapply(all_models, resamples)
 
 # NOTE: in these CV summaries caret treats the FIRST factor level ("No") as
-# the positive class, so "Sens" here = non-defaulters caught and "Spec" =
-# defaulters caught. ROC is unaffected. Section 7 reports them the right way
-# round (positive = "Yes").
-summary(state_cv)      # mean ROC / Sens / Spec across folds - state models
-summary(combined_cv)   # same for combined models
-
-# Box plots of fold-level ROC: the model whose box sits highest (and is narrow)
-# is the best and most stable choice.
-bwplot(state_cv,    metric = "ROC", main = "State-based models: CV ROC AUC")
-bwplot(combined_cv, metric = "ROC", main = "Combined (baseline) models: CV ROC AUC")
+# the positive class and uses a 0.5 cut-off, so "Sens" = non-defaulters
+# caught and "Spec" = defaulters caught. ROC is unaffected. Section 7
+# reports them the right way round (positive = "Yes").
+for (set_name in names(all_cv)) {
+  cat("\n==================", set_name, "==================\n")
+  print(summary(all_cv[[set_name]], metric = "ROC"))
+  
+  # Paired tests on the fold-level ROC (Bonferroni-adjusted).
+  # Upper half = difference (row minus column), lower half = p-value.
+  # Caveat: only 5 folds that share most of their training data, so the
+  # p-values are somewhat optimistic.
+  print(summary(diff(all_cv[[set_name]], metric = "ROC")))
+  
+  # Box plots of fold-level ROC: the model whose box sits highest (and is
+  # narrow) is the best and most stable choice. (print() is needed inside a loop)
+  print(bwplot(all_cv[[set_name]], metric = "ROC",
+               main = paste(set_name, "models: CV ROC AUC")))
+}
 
 # Pick the best algorithm for each feature set by mean CV ROC
 best_name <- function(cv) {
   mean_roc <- colMeans(cv$values[, grep("~ROC$", names(cv$values))])
   sub("~ROC$", "", names(which.max(mean_roc)))
 }
-best_state    <- best_name(state_cv)
-best_combined <- best_name(combined_cv)
-best_state
-best_combined
+best_models <- sapply(all_cv, best_name)
+best_models
 
-# Which predictors did the best models rely on most?
-plot(varImp(state_models[[best_state]]),
-     main = paste("Variable importance -", best_state, "(state)"))
-plot(varImp(combined_models[[best_combined]]), top = 15,
-     main = paste("Variable importance -", best_combined, "(combined)"))
+# Which predictors did the best model of each set rely on most?
+for (set_name in names(best_models)) {
+  imp <- varImp(all_models[[set_name]][[best_models[[set_name]]]])
+  # top = number of predictors to show (capped at how many the model has)
+  print(plot(imp, top = min(15, nrow(imp$importance)),
+             main = paste("Variable importance -", best_models[[set_name]],
+                          "(", set_name, ")")))
+}
+
+
+
+
+
+
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -408,49 +474,131 @@ evaluate_on_test <- function(model, data, threshold) {
   cm   <- confusionMatrix(pred, data$DEFAULT, positive = "Yes")
   roc_obj <- roc(data$DEFAULT, prob, levels = c("No", "Yes"),
                  direction = "<", quiet = TRUE)
+  # Brier score = mean squared error between the predicted probability and
+  # the actual outcome (1 = defaulted, 0 = not). It measures how accurate the
+  # probabilities themselves are (calibration). Lower = better.
+  # This is the classification counterpart of MSE/RMSE.
+  brier <- mean((prob - (data$DEFAULT == "Yes"))^2)
   data.frame(AUC              = round(as.numeric(auc(roc_obj)), 3),
              Accuracy         = round(cm$overall[["Accuracy"]], 3),
              Sensitivity      = round(cm$byClass[["Sensitivity"]], 3),  # defaulters caught
              Specificity      = round(cm$byClass[["Specificity"]], 3),  # non-defaulters correctly cleared
-             BalancedAccuracy = round(cm$byClass[["Balanced Accuracy"]], 3))
+             BalancedAccuracy = round(cm$byClass[["Balanced Accuracy"]], 3),
+             Brier            = round(brier, 4))
 }
 
-# Evaluate ALL six models (3 algorithms x 2 feature sets) on the test set
-results <- bind_rows(
-  lapply(names(state_models), function(m)
-    cbind(FeatureSet = "State-based", Model = m,
-          evaluate_on_test(state_models[[m]], test_data, threshold))),
-  lapply(names(combined_models), function(m)
-    cbind(FeatureSet = "Combined (baseline)", Model = m,
-          evaluate_on_test(combined_models[[m]], test_data, threshold)))
-)
+# Evaluate ALL nine models (3 algorithms x 3 feature sets) on the test set
+results <- bind_rows(lapply(names(all_models), function(set_name) {
+  bind_rows(lapply(names(all_models[[set_name]]), function(m)
+    cbind(FeatureSet = set_name, Model = m,
+          evaluate_on_test(all_models[[set_name]][[m]], test_data, threshold))))
+}))
 print(results)
-write.csv(results, "test_results_state_vs_combined.csv", row.names = FALSE)
+write.csv(results, "test_results_all_feature_sets.csv", row.names = FALSE)
 
-# ROC curves on the test set: the further a curve bulges to the top-left,
-# the better. The diagonal = random guessing (AUC 0.5).
-roc_list <- c(
-  setNames(lapply(state_models, function(m)
-    roc(test_data$DEFAULT, predict(m, test_data, type = "prob")[, "Yes"],
-        levels = c("No", "Yes"), direction = "<", quiet = TRUE)),
-    paste("State -", names(state_models))),
-  setNames(lapply(combined_models, function(m)
-    roc(test_data$DEFAULT, predict(m, test_data, type = "prob")[, "Yes"],
-        levels = c("No", "Yes"), direction = "<", quiet = TRUE)),
-    paste("Combined -", names(combined_models)))
-)
-roc_plot <- ggroc(roc_list, legacy.axes = TRUE) +
+# Reference Brier score of a "no-skill" model that gives every client the
+# average default rate. A useful model must score BELOW this (~0.17).
+no_skill_brier <- mean((threshold - (test_data$DEFAULT == "Yes"))^2)
+no_skill_brier
+
+# Headline comparison: the CV-selected model of each feature set
+final_comparison <- results %>%
+  filter(paste(FeatureSet, Model) %in% paste(names(best_models), best_models))
+print(final_comparison)
+write.csv(final_comparison, "final_comparison_selected_models.csv", row.names = FALSE)
+
+# --- 7a. ROC curves on the test set -------------------------------------------
+# The further a curve bulges to the top-left, the better.
+# The diagonal = random guessing (AUC 0.5).
+get_test_prob <- function(model) predict(model, test_data, type = "prob")[, "Yes"]
+
+roc_list <- list()
+for (set_name in names(all_models)) {
+  for (m in names(all_models[[set_name]])) {
+    roc_list[[paste(set_name, "-", m)]] <-
+      roc(test_data$DEFAULT, get_test_prob(all_models[[set_name]][[m]]),
+          levels = c("No", "Yes"), direction = "<", quiet = TRUE)
+  }
+}
+
+# All 9 models
+roc_plot_all <- ggroc(roc_list, legacy.axes = TRUE) +
   geom_abline(linetype = "dashed", colour = "grey50") +
-  labs(title = "Test-set ROC curves: state-based vs combined",
+  labs(title = "Test-set ROC curves: all models and feature sets",
        x = "False positive rate (1 - specificity)",
        y = "True positive rate (sensitivity)", colour = "Model") +
   theme_minimal()
-print(roc_plot)
-ggsave("roc_state_vs_combined.png", roc_plot, width = 8, height = 5)
+print(roc_plot_all)
+ggsave("roc_all_models.png", roc_plot_all, width = 9, height = 6)
+
+# Only the selected model of each feature set (cleaner for the report)
+selected_keys <- paste(names(best_models), "-", best_models)
+roc_plot_best <- ggroc(roc_list[selected_keys], legacy.axes = TRUE, linewidth = 1) +
+  geom_abline(linetype = "dashed", colour = "grey50") +
+  labs(title = "Test-set ROC: selected model per feature set",
+       x = "False positive rate (1 - specificity)",
+       y = "True positive rate (sensitivity)", colour = "Feature set - model") +
+  theme_minimal()
+print(roc_plot_best)
+ggsave("roc_selected_models.png", roc_plot_best, width = 8, height = 5)
+
+# --- 7b. Calibration plot of the selected models ------------------------------
+# Are the predicted probabilities realistic? Test clients are sorted into 10
+# groups by predicted probability; for each group we plot the average
+# predicted probability against the ACTUAL default rate. Points on the dashed
+# diagonal = well-calibrated probabilities (similar in spirit to Yeh & Lien's
+# predicted-vs-real probability comparison).
+calibration_data <- bind_rows(lapply(names(best_models), function(set_name) {
+  prob <- get_test_prob(all_models[[set_name]][[best_models[[set_name]]]])
+  data.frame(prob = prob, actual = test_data$DEFAULT == "Yes") %>%
+    mutate(bin = ntile(prob, 10)) %>%
+    group_by(bin) %>%
+    summarise(mean_predicted = mean(prob),
+              observed_rate  = mean(actual), .groups = "drop") %>%
+    mutate(FeatureSet = paste(set_name, "-", best_models[[set_name]]))
+}))
+calibration_plot <- ggplot(calibration_data,
+                           aes(x = mean_predicted, y = observed_rate, colour = FeatureSet)) +
+  geom_abline(linetype = "dashed", colour = "grey50") +
+  geom_line() + geom_point() +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(title = "Calibration of the selected models (test set)",
+       x = "Mean predicted probability of default",
+       y = "Observed default rate", colour = "Feature set - model") +
+  theme_minimal()
+print(calibration_plot)
+ggsave("calibration_selected_models.png", calibration_plot, width = 7, height = 6)
 
 # Save the trained models so they don't have to be retrained for the report
-saveRDS(state_models,    "state_models.rds")
-saveRDS(combined_models, "combined_models.rds")
+saveRDS(all_models, "all_models.rds")
 
 
 
+
+
+
+
+
+# -----------------------------------------------------------------------------
+# 8. CHECK OF THE FEATURE-SELECTION DECISION: RE-ADD THE BILL AMOUNTS
+# -----------------------------------------------------------------------------
+# The plots suggested BILL_* carry no information on their own. Here we test
+# that decision: the combined random forest is retrained WITH the bill
+# amounts (same settings, folds and seed) and compared with the model without.
+bill_formula <- as.formula(paste("DEFAULT ~",
+                                 paste(c(combined_features, bill_vars), collapse = " + ")))
+set.seed(515)
+rf_with_bills <- train(bill_formula, data = train_data, method = "ranger",
+                       metric = "ROC", trControl = ctrl, tuneGrid = rf_grid,
+                       num.trees = 300, importance = "impurity")
+
+bill_check <- resamples(list(Without_BILL = all_models[["Combined (baseline)"]]$RandomForest,
+                             With_BILL    = rf_with_bills))
+summary(bill_check, metric = "ROC")
+summary(diff(bill_check, metric = "ROC"))
+# Previous run: mean ROC 0.780 without vs 0.783 with (p = 0.008).
+# A statistically detectable but practically negligible gain (~0.003 AUC),
+# so the simpler model without the 6 bill variables is kept. The gain
+# suggests bill amounts are informative only IN COMBINATION with other
+# variables (e.g. bill relative to LIMIT_BAL), which univariate plots cannot
+# show - a limitation of the visual feature-selection method.
